@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Connection validation document
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Conversation validation helper
+    function isValidConversation(data) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'tone', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'title', 'tone', 'createdAt', 'updatedAt'])
+        && data.id is string && isValidId(data.id)
+        && data.userId is string && data.userId == request.auth.uid
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.tone in ['professional', 'casual', 'concise']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Message validation helper
+    function isValidMessage(data) {
+      return data.keys().hasAll(['id', 'conversationId', 'userId', 'role', 'content', 'tone', 'createdAt'])
+        && data.keys().hasOnly(['id', 'conversationId', 'userId', 'role', 'content', 'tone', 'createdAt'])
+        && data.id is string && isValidId(data.id)
+        && data.conversationId is string && isValidId(data.conversationId)
+        && data.userId is string && data.userId == request.auth.uid
+        && data.role in ['user', 'model']
+        && data.content is string && data.content.size() <= 50000
+        && data.tone in ['professional', 'casual', 'concise']
+        && data.createdAt is timestamp;
+    }
+
+    // User conversations and nested messages
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+
+      match /conversations/{conversationId} {
+        allow get: if isSignedIn() && request.auth.uid == userId && isValidId(conversationId);
+        allow list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn()
+          && request.auth.uid == userId
+          && isValidId(conversationId)
+          && isValidConversation(incoming())
+          && incoming().id == conversationId;
+
+        allow update: if isSignedIn()
+          && request.auth.uid == userId
+          && isValidId(conversationId)
+          && isValidConversation(incoming())
+          && incoming().userId == existing().userId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'tone', 'updatedAt']);
+
+        allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(conversationId);
+
+        match /messages/{messageId} {
+          allow get: if isSignedIn() && request.auth.uid == userId && isValidId(messageId);
+          allow list: if isSignedIn() && request.auth.uid == userId;
+
+          allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && isValidId(messageId)
+            && isValidMessage(incoming())
+            && incoming().id == messageId
+            && incoming().conversationId == conversationId
+            && exists(/databases/$(database)/documents/users/$(userId)/conversations/$(conversationId));
+
+          allow update: if isSignedIn()
+            && request.auth.uid == userId
+            && isValidId(messageId)
+            && isValidMessage(incoming())
+            && incoming().userId == existing().userId
+            && incoming().conversationId == existing().conversationId
+            && incoming().createdAt == existing().createdAt
+            && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'tone']);
+
+          allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(messageId);
+        }
+      }
+    }
+  }
+}
